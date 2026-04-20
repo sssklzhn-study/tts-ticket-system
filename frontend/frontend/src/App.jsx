@@ -4,8 +4,8 @@ import { auth } from './firebase';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
 import './App.css';
 
-const API_URL = 'http://localhost:5000';
-
+// const API_URL = 'http://localhost:5000';
+const API_URL = 'https://tts-ticket-system-1.onrender.com';
 function App() {
   // Основные состояния
   const [user, setUser] = useState(null);
