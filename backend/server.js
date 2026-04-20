@@ -30,12 +30,40 @@ const db = admin.firestore();
 const app = express();
 
 // Настройка CORS для продакшена
+// const allowedOrigins = [
+//   'http://localhost:5173',
+//   'http://localhost:3000',
+//   'https://tts-ticket-system.vercel.app',
+//   'https://tts-ticket-system-v2.vercel.app'
+// ];
+// Настройка CORS для продакшена
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:3000',
   'https://tts-ticket-system.vercel.app',
-  'https://tts-ticket-system-v2.vercel.app'
+  'https://tts-ticket-system-1.onrender.com'
 ];
+
+app.use(cors({
+  origin: function(origin, callback) {
+    // Разрешаем запросы без origin (например, из Postman)
+    if (!origin) return callback(null, true);
+    
+    // Проверяем, разрешён ли origin
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    }
+    
+    // Также разрешаем любые .vercel.app поддомены
+    if (origin.match(/\.vercel\.app$/)) {
+      return callback(null, true);
+    }
+    
+    console.log(`❌ CORS blocked: ${origin}`);
+    return callback(new Error('CORS policy does not allow access from this origin'), false);
+  },
+  credentials: true
+}));
 
 app.use(cors({
   origin: function(origin, callback) {
