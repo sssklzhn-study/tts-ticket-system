@@ -2,7 +2,25 @@ const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
 
-const serviceAccount = require('./firebase-admin.json');
+// --------------------------------------------------------------
+// Загрузка сервисного ключа Firebase
+// --------------------------------------------------------------
+let serviceAccount;
+if (process.env.FIREBASE_ADMIN_KEY) {
+  // На Render - используем переменную окружения
+  serviceAccount = JSON.parse(process.env.FIREBASE_ADMIN_KEY);
+  console.log('✅ Firebase ключ загружен из переменной окружения');
+} else {
+  // Локально - используем файл
+  try {
+    serviceAccount = require('./firebase-admin.json');
+    console.log('✅ Firebase ключ загружен из файла');
+  } catch (err) {
+    console.error('❌ Ошибка: не найден файл firebase-admin.json и не задана переменная FIREBASE_ADMIN_KEY');
+    console.error('Убедитесь, что вы добавили переменную окружения на Render.');
+    process.exit(1);
+  }
+}
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -10,7 +28,25 @@ admin.initializeApp({
 
 const db = admin.firestore();
 const app = express();
-app.use(cors());
+
+// Настройка CORS для продакшена
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'https://tts-ticket-system.vercel.app',
+  'https://tts-ticket-system-v2.vercel.app'
+];
+
+app.use(cors({
+  origin: function(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  }
+}));
 app.use(express.json());
 
 // --------------------------------------------------------------
@@ -27,13 +63,14 @@ async function getUserRole(email) {
 // Регистрация нового пользователя (создаём запись с ролью 'user')
 // --------------------------------------------------------------
 app.post('/register-user', async (req, res) => {
-  const { email } = req.body;
+  const { email, role } = req.body;
   if (!email) return res.status(400).json({ error: 'Email required' });
   const usersRef = db.collection('users');
   const snapshot = await usersRef.where('email', '==', email).get();
   if (snapshot.empty) {
-    await usersRef.add({ email, role: 'user' });
-    console.log(`✅ Новый пользователь: ${email} (роль: user)`);
+    const userRole = role || 'user';
+    await usersRef.add({ email, role: userRole });
+    console.log(`✅ Новый пользователь: ${email} (роль: ${userRole})`);
   }
   res.json({ success: true });
 });
@@ -70,31 +107,8 @@ app.get('/tickets', async (req, res) => {
 });
 
 // --------------------------------------------------------------
-// Создать заявку (только для авторизованных)
-// --------------------------------------------------------------
-// app.post('/tickets', async (req, res) => {
-//   const { equipment, problem, urgency, userId } = req.body;
-//   if (!equipment || !problem || !urgency || !userId) {
-//     return res.status(400).json({ error: 'Все поля обязательны' });
-//   }
-//   try {
-//     const newTicket = {
-//       userId,
-//       equipment,
-//       problem,
-//       urgency,
-//       status: 'pending',   // pending = Ожидание
-//       createdBy: userId,
-//       createdAt: new Date().toISOString(),
-//       history: [{ action: 'Создана', date: new Date().toISOString(), by: userId }]
-//     };
-//     const docRef = await db.collection('tickets').add(newTicket);
-//     res.json({ id: docRef.id, ...newTicket });
-//   } catch (err) {
-//     res.status(500).json({ error: err.message });
-//   }
-// });
 // Создать заявку (с location и contactPhone)
+// --------------------------------------------------------------
 app.post('/tickets', async (req, res) => {
   const { equipment, problem, urgency, location, contactPhone, category, dueDate, attachment, userId } = req.body;
   
@@ -152,20 +166,8 @@ app.put('/tickets/:id/status', async (req, res) => {
 });
 
 // --------------------------------------------------------------
-// Создаём админа в Firestore при старте (если его нет)
-// --------------------------------------------------------------
-const setupAdmin = async () => {
-  const adminEmail = 'admin@tts.kz';   // ✏️ ИЗМЕНИТЕ НА ВАШ EMAIL АДМИНА
-  const usersRef = db.collection('users');
-  const snapshot = await usersRef.where('email', '==', adminEmail).get();
-  if (snapshot.empty) {
-    await usersRef.add({ email: adminEmail, role: 'admin' });
-    console.log(`✅ Админ ${adminEmail} создан в Firestore`);
-  } else {
-    console.log(`✅ Админ уже существует`);
-  }
-};
 // Добавить комментарий к заявке
+// --------------------------------------------------------------
 app.post('/tickets/:id/comment', async (req, res) => {
   const { id } = req.params;
   const { comment, userId } = req.body;
@@ -181,7 +183,10 @@ app.post('/tickets/:id/comment', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// --------------------------------------------------------------
 // Удалить заявку (только админ)
+// --------------------------------------------------------------
 app.delete('/tickets/:id', async (req, res) => {
   const { id } = req.params;
   const { email, role } = req.query;
@@ -194,7 +199,9 @@ app.delete('/tickets/:id', async (req, res) => {
   }
 });
 
+// --------------------------------------------------------------
 // Назначить заявку на себя (админ)
+// --------------------------------------------------------------
 app.put('/tickets/:id/assign', async (req, res) => {
   const { id } = req.params;
   const { assignedTo, requesterEmail } = req.body;
@@ -208,34 +215,9 @@ app.put('/tickets/:id/assign', async (req, res) => {
   }
 });
 
-// Аналитика
-app.get('/analytics', async (req, res) => {
-  const { email, role } = req.query;
-  try {
-    let query = db.collection('tickets');
-    if (role !== 'admin') query = query.where('userId', '==', email);
-    const snapshot = await query.get();
-    const tickets = snapshot.docs.map(doc => doc.data());
-    
-    // Рейтинг пользователей (для админа)
-    const userStats = {};
-    tickets.forEach(t => {
-      if (!userStats[t.userId]) userStats[t.userId] = { total: 0, completed: 0 };
-      userStats[t.userId].total++;
-      if (t.status === 'completed') userStats[t.userId].completed++;
-    });
-    const userRatings = Object.entries(userStats).map(([email, stats]) => ({
-      email,
-      score: stats.completed / stats.total * 100 || 0,
-      completed: stats.completed
-    })).sort((a, b) => b.score - a.score).slice(0, 5);
-    
-    res.json({ userRatings, averageCompletionTime: 0 });
-  } catch (err) {
-    res.json({ userRatings: [], averageCompletionTime: 0 });
-  }
-});
+// --------------------------------------------------------------
 // Оценка заявки
+// --------------------------------------------------------------
 app.post('/tickets/:id/rating', async (req, res) => {
   const { id } = req.params;
   const { rating, userId } = req.body;
@@ -247,7 +229,9 @@ app.post('/tickets/:id/rating', async (req, res) => {
   }
 });
 
+// --------------------------------------------------------------
 // Аналитика
+// --------------------------------------------------------------
 app.get('/analytics', async (req, res) => {
   const { email, role } = req.query;
   try {
@@ -263,7 +247,9 @@ app.get('/analytics', async (req, res) => {
       if (t.status === 'completed') userStats[t.userId].completed++;
     });
     const userRatings = Object.entries(userStats).map(([email, stats]) => ({
-      email, score: (stats.completed / stats.total * 100) || 0, completed: stats.completed
+      email, 
+      score: (stats.completed / stats.total * 100) || 0, 
+      completed: stats.completed
     })).sort((a, b) => b.score - a.score).slice(0, 5);
     
     res.json({ userRatings, averageCompletionTime: 0 });
@@ -271,7 +257,26 @@ app.get('/analytics', async (req, res) => {
     res.json({ userRatings: [], averageCompletionTime: 0 });
   }
 });
+
+// --------------------------------------------------------------
+// Создаём админа в Firestore при старте (если его нет)
+// --------------------------------------------------------------
+const setupAdmin = async () => {
+  const adminEmail = 'admin@tts.kz';
+  const usersRef = db.collection('users');
+  const snapshot = await usersRef.where('email', '==', adminEmail).get();
+  if (snapshot.empty) {
+    await usersRef.add({ email: adminEmail, role: 'admin' });
+    console.log(`✅ Админ ${adminEmail} создан в Firestore`);
+  } else {
+    console.log(`✅ Админ уже существует`);
+  }
+};
+
 setupAdmin();
 
-const PORT = 5000;
+// --------------------------------------------------------------
+// Запуск сервера
+// --------------------------------------------------------------
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`✅ Бэкенд запущен: http://localhost:${PORT}`));
